@@ -7,21 +7,16 @@ const BASE44_WEBHOOK_URL = process.env.BASE44_WEBHOOK_URL;
 const BASE44_WEBHOOK_SECRET = process.env.BASE44_WEBHOOK_SECRET;
 
 if (!OPENAI_API_KEY || !BASE44_WEBHOOK_URL || !BASE44_WEBHOOK_SECRET) {
-  console.error('[ERROR] Missing required env vars: OPENAI_API_KEY, BASE44_WEBHOOK_URL, BASE44_WEBHOOK_SECRET');
+  console.error('[ERROR] Missing required env vars');
   process.exit(1);
 }
 
 const buildPrompt = (agentName, listingAddress, contactName) => {
   return `You are an AI calling on behalf of ${agentName || 'a real estate agent'} about ${listingAddress || 'a property'}.
-You are speaking with ${contactName || 'a potential buyer'}.
-Your goal is to book them in for either a phone call with the agent or an in-person inspection.
-
-Instructions:
-1. Be warm and professional
-2. Ask what date and time suits them best
-3. Once they confirm, say exactly: BOOKING_CONFIRMED: [call or meeting] on [date] at [time]
-4. Keep responses brief and natural
-
+Speaking with ${contactName || 'a potential buyer'}.
+Goal: Book them for a phone call or inspection.
+Ask what date and time works, confirm it, then say: BOOKING_CONFIRMED: [call or meeting] on [date] at [time]
+Be warm and brief.
 Today is ${new Date().toLocaleDateString('en-AU', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.`;
 };
 
@@ -39,9 +34,13 @@ wss.on('connection', (twilioWs) => {
   let streamSid = null;
   let bookingDone = false;
   let aiWs = null;
+  let aiReady = false;
 
   // Create OpenAI connection
   const connectToOpenAI = () => {
+    aiReady = false;
+    console.log('[OpenAI] Connecting...');
+    
     aiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01', {
       headers: {
         'Authorization': `Bearer ${OPENAI_API_KEY}`,
@@ -50,7 +49,7 @@ wss.on('connection', (twilioWs) => {
     });
 
     aiWs.on('open', () => {
-      console.log('[Bridge] OpenAI connected');
+      console.log('[OpenAI] Connected, initializing...');
       
       try {
         aiWs.send(JSON.stringify({
@@ -76,8 +75,10 @@ wss.on('connection', (twilioWs) => {
         }));
 
         aiWs.send(JSON.stringify({ type: 'response.create' }));
+        aiReady = true;
+        console.log('[OpenAI] Ready for audio');
       } catch (err) {
-        console.error('[OpenAI] Send error:', err.message);
+        console.error('[OpenAI] Init error:', err.message);
       }
     });
 
@@ -115,11 +116,15 @@ wss.on('connection', (twilioWs) => {
 
     aiWs.on('error', (err) => {
       console.error('[OpenAI Error]', err.message);
-      twilioWs.close();
+      aiReady = false;
+      if (twilioWs.readyState === WebSocket.OPEN) {
+        twilioWs.close();
+      }
     });
 
     aiWs.on('close', () => {
       console.log('[OpenAI Closed]');
+      aiReady = false;
     });
   };
 
@@ -146,11 +151,19 @@ wss.on('connection', (twilioWs) => {
         console.log('[Bridge] Call started:', params.contact_name);
       }
 
-      if (message.event === 'media' && aiWs && aiWs.readyState === WebSocket.OPEN) {
-        aiWs.send(JSON.stringify({
-          type: 'input_audio_buffer.append',
-          audio: message.media.payload
-        }));
+      // Only send audio if OpenAI is ready
+      if (message.event === 'media') {
+        if (!aiReady) {
+          console.warn('[Bridge] OpenAI not ready yet, buffering audio...');
+          return;
+        }
+        
+        if (aiWs && aiWs.readyState === WebSocket.OPEN) {
+          aiWs.send(JSON.stringify({
+            type: 'input_audio_buffer.append',
+            audio: message.media.payload
+          }));
+        }
       }
 
       if (message.event === 'stop') {
@@ -179,14 +192,10 @@ wss.on('connection', (twilioWs) => {
   });
 });
 
-// Extract booking details and send to Base44
 async function book(text, p) {
   try {
     const type = /meeting|inspection/i.test(text) ? 'meeting' : 'call';
 
-    console.log('[Book] Extracting date from:', text);
-
-    // Use GPT to extract date
     const gptRes = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -198,21 +207,15 @@ async function book(text, p) {
         response_format: { type: 'json_object' },
         messages: [{
           role: 'user',
-          content: `Extract the appointment date and time from this booking confirmation. Today is ${new Date().toISOString()}. Return JSON: {iso_date: "ISO8601 string in Australia/Melbourne timezone"}. Text: "${text}"`
+          content: `Extract appointment date/time. Today: ${new Date().toISOString()}. Return {iso_date: "ISO8601 in Australia/Melbourne"}. Text: "${text}"`
         }]
       })
     });
 
-    if (!gptRes.ok) {
-      throw new Error(`GPT error: ${gptRes.status}`);
-    }
-
+    if (!gptRes.ok) throw new Error(`GPT error: ${gptRes.status}`);
     const gptData = await gptRes.json();
     const booking = JSON.parse(gptData.choices[0].message.content);
 
-    console.log('[Book] Extracted date:', booking.iso_date);
-
-    // Send to Base44 webhook
     const webhookRes = await fetch(BASE44_WEBHOOK_URL, {
       method: 'POST',
       headers: {
@@ -232,10 +235,7 @@ async function book(text, p) {
       })
     });
 
-    if (!webhookRes.ok) {
-      throw new Error(`Webhook error: ${webhookRes.status}`);
-    }
-
+    if (!webhookRes.ok) throw new Error(`Webhook error: ${webhookRes.status}`);
     console.log('[Book] ✓ Sent to Base44 -', type, booking.iso_date);
   } catch (err) {
     console.error('[Book] Error:', err.message);
@@ -243,10 +243,9 @@ async function book(text, p) {
 }
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Bridge] Server running on 0.0.0.0:${PORT}`);
+  console.log(`[Bridge] Running on 0.0.0.0:${PORT}`);
 });
 
-// Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('[Bridge] SIGTERM received, closing');
   server.close();
