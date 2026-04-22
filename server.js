@@ -34,13 +34,18 @@ Today is ${new Date().toLocaleDateString('en-AU', { weekday: 'long', year: 'nume
 };
 
 const server = http.createServer((req, res) => {
-  if (req.url === '/health' || req.url === '/') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }));
-    console.log('[Health] Check passed');
-  } else {
-    res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('Not Found');
+  try {
+    if (req.url === '/health' || req.url === '/') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }));
+    } else {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not Found');
+    }
+  } catch (err) {
+    console.error('[Server] Error handling request:', err.message);
+    res.writeHead(500, { 'Content-Type': 'text/plain' });
+    res.end('Internal Server Error');
   }
 });
 
@@ -263,8 +268,12 @@ async function book(text, p) {
   }
 }
 
+let isHealthy = false;
+
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Bridge] Running on 0.0.0.0:${PORT}`);
+  isHealthy = true;
+  console.log(`[Bridge] ✓ Server listening on 0.0.0.0:${PORT}`);
+  console.log('[Bridge] Ready to accept connections');
 });
 
 process.on('uncaughtException', (err) => {
