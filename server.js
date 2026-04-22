@@ -216,7 +216,10 @@ async function book(text, p) {
       })
     });
 
-    if (!gptRes.ok) throw new Error(\`GPT error: \${gptRes.status}\`);
+    if (!gptRes.ok) {
+      const errText = await gptRes.text();
+      throw new Error(\`GPT error: \${gptRes.status} - \${errText}\`);
+    }
     const gptData = await gptRes.json();
     const booking = JSON.parse(gptData.choices[0].message.content);
 
