@@ -1,5 +1,6 @@
 const WebSocket = require('ws');
 const http = require('http');
+
 const PORT = process.env.PORT || 8080;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const BASE44_WEBHOOK_URL = process.env.BASE44_WEBHOOK_URL;
@@ -63,7 +64,7 @@ wss.on('connection', (twilioWs) => {
   aiWs.on('message', (data) => {
     const e = JSON.parse(data);
     if (e.type === 'response.audio.delta' && e.delta && twilioWs.readyState === WebSocket.OPEN) {
-      twilioWs.send(JSON.stringify({ event: 'media', streamSid: streamSid, media: { payload: e.delta } }));
+      twilioWs.send(JSON.stringify({ event: 'media', streamSid, media: { payload: e.delta } }));
     }
     if (e.type === 'response.audio_transcript.done') {
       console.log('[AI] ' + e.transcript);
@@ -131,3 +132,6 @@ function book(text, p) {
       headers: { 'Content-Type': 'application/json', 'x-webhook-secret': BASE44_WEBHOOK_SECRET },
       body: JSON.stringify({ contact_id: p.contact_id, contact_name: p.contact_name, agent_name: p.agent_name, agent_email: p.agent_email, listing_address: p.listing_address, appointment_type: /meeting/i.test(text) ? 'meeting' : 'call', appointment_date: d.iso_date, notes: text, company_id: p.company_id })
     });
+  })
+  .catch(err => console.error('[Book] ' + err.message));
+}
