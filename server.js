@@ -53,21 +53,32 @@ const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (twilioWs) => {
   console.log('[Bridge] Twilio connected');
-  
+
   let params = {};
   let streamSid = null;
   let bookingDone = false;
   let aiWs = null;
   let aiReady = false;
+  let audioBuffer = []; // FIX: actually buffer audio until OpenAI is ready
 
-  // Create OpenAI connection
+  // FIX: helper to send audio to Twilio safely
+  const sendAudioToTwilio = (payload) => {
+    if (twilioWs.readyState === WebSocket.OPEN && streamSid) {
+      twilioWs.send(JSON.stringify({
+        event: 'media',
+        streamSid: streamSid,
+        media: { payload }
+      }));
+    }
+  };
+
+  // FIX: connectToOpenAI is now called AFTER params are set in the 'start' event
   const connectToOpenAI = () => {
     aiReady = false;
     console.log('[OpenAI] Connecting...');
-    console.log('[OpenAI] URL: wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01');
     console.log('[OpenAI] Auth key present:', !!OPENAI_API_KEY);
-    
-    aiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01', {
+
+    aiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', {
       headers: {
         'Authorization': `Bearer ${OPENAI_API_KEY}`,
         'OpenAI-Beta': 'realtime=v1'
@@ -76,8 +87,9 @@ wss.on('connection', (twilioWs) => {
 
     aiWs.on('open', () => {
       console.log('[OpenAI] ✓ Connected, initializing...');
-      
+
       try {
+        // FIX: params are now populated before this runs
         aiWs.send(JSON.stringify({
           type: 'session.update',
           session: {
@@ -101,8 +113,24 @@ wss.on('connection', (twilioWs) => {
         }));
 
         aiWs.send(JSON.stringify({ type: 'response.create' }));
+
         aiReady = true;
         console.log('[OpenAI] Ready for audio');
+
+        // FIX: flush any buffered audio now that OpenAI is ready
+        if (audioBuffer.length > 0) {
+          console.log(`[OpenAI] Flushing ${audioBuffer.length} buffered audio chunks`);
+          audioBuffer.forEach(payload => {
+            if (aiWs.readyState === WebSocket.OPEN) {
+              aiWs.send(JSON.stringify({
+                type: 'input_audio_buffer.append',
+                audio: payload
+              }));
+            }
+          });
+          audioBuffer = [];
+        }
+
       } catch (err) {
         console.error('[OpenAI] Init error:', err.message);
       }
@@ -112,29 +140,33 @@ wss.on('connection', (twilioWs) => {
       try {
         const event = JSON.parse(data.toString());
 
+        // Log all event types for debugging
+        console.log('[OpenAI Event]', event.type);
+
+        // Catch OpenAI errors
+        if (event.type === 'error') {
+          console.error('[OpenAI ERROR]', JSON.stringify(event));
+        }
+
         // Send audio back to Twilio
         if (event.type === 'response.audio.delta' && event.delta) {
-          if (twilioWs.readyState === WebSocket.OPEN) {
-            twilioWs.send(JSON.stringify({
-              event: 'media',
-              streamSid: streamSid,
-              media: { payload: event.delta }
-            }));
-          }
+          console.log('[Audio] Sending to Twilio, streamSid:', streamSid);
+          sendAudioToTwilio(event.delta);
         }
 
         // Log transcripts
         if (event.type === 'response.audio_transcript.done') {
           console.log('[AI]', event.transcript);
+
+          // Check for booking confirmation
+          const transcript = event.transcript || '';
+          if (transcript && /BOOKING_CONFIRMED/i.test(transcript) && !bookingDone) {
+            bookingDone = true;
+            console.log('[Bridge] Booking detected:', transcript);
+            book(transcript, params);
+          }
         }
 
-        // Check for booking confirmation
-        const transcript = event.transcript || event.text || '';
-        if (transcript && /BOOKING_CONFIRMED/i.test(transcript) && !bookingDone) {
-          bookingDone = true;
-          console.log('[Bridge] Booking detected:', transcript);
-          book(transcript, params);
-        }
       } catch (err) {
         console.error('[OpenAI Message] Parse error:', err.message);
       }
@@ -154,8 +186,6 @@ wss.on('connection', (twilioWs) => {
     });
   };
 
-  connectToOpenAI();
-
   // Handle Twilio messages
   twilioWs.on('message', (data) => {
     try {
@@ -164,7 +194,7 @@ wss.on('connection', (twilioWs) => {
       if (message.event === 'start') {
         streamSid = message.start.streamSid;
         const customParams = message.start.customParameters || {};
-        
+
         params = {
           contact_id: customParams.contact_id || '',
           contact_name: customParams.contact_name || '',
@@ -173,17 +203,21 @@ wss.on('connection', (twilioWs) => {
           agent_email: customParams.agent_email || '',
           company_id: customParams.company_id || ''
         };
-        
+
         console.log('[Bridge] Call started:', params.contact_name);
+        console.log('[Bridge] Params:', JSON.stringify(params));
+
+        // FIX: connect to OpenAI AFTER params are populated
+        connectToOpenAI();
       }
 
-      // Only send audio if OpenAI is ready
       if (message.event === 'media') {
         if (!aiReady) {
-          console.warn('[Bridge] OpenAI not ready yet, buffering audio...');
+          // FIX: actually buffer the audio instead of dropping it
+          audioBuffer.push(message.media.payload);
           return;
         }
-        
+
         if (aiWs && aiWs.readyState === WebSocket.OPEN) {
           aiWs.send(JSON.stringify({
             type: 'input_audio_buffer.append',
@@ -198,6 +232,7 @@ wss.on('connection', (twilioWs) => {
           aiWs.close();
         }
       }
+
     } catch (err) {
       console.error('[Twilio Message] Parse error:', err.message);
     }
@@ -268,10 +303,7 @@ async function book(text, p) {
   }
 }
 
-let isHealthy = false;
-
 server.listen(PORT, '0.0.0.0', () => {
-  isHealthy = true;
   console.log(`[Bridge] ✓ Server listening on 0.0.0.0:${PORT}`);
   console.log('[Bridge] Ready to accept connections');
 });
@@ -288,7 +320,7 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 process.on('SIGTERM', () => {
-  console.log('[Bridge] SIGTERM received, closing');
+  console.log('[Bridge] SIGTERM received, closing gracefully');
   server.close();
   process.exit(0);
 });
