@@ -6,10 +6,23 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const BASE44_WEBHOOK_URL = process.env.BASE44_WEBHOOK_URL;
 const BASE44_WEBHOOK_SECRET = process.env.BASE44_WEBHOOK_SECRET;
 
-if (!OPENAI_API_KEY || !BASE44_WEBHOOK_URL || !BASE44_WEBHOOK_SECRET) {
-  console.error('[ERROR] Missing required env vars');
+if (!OPENAI_API_KEY) {
+  console.error('[ERROR] Missing OPENAI_API_KEY');
   process.exit(1);
 }
+if (!BASE44_WEBHOOK_URL) {
+  console.error('[ERROR] Missing BASE44_WEBHOOK_URL');
+  process.exit(1);
+}
+if (!BASE44_WEBHOOK_SECRET) {
+  console.error('[ERROR] Missing BASE44_WEBHOOK_SECRET');
+  process.exit(1);
+}
+
+console.log('[Init] Environment variables loaded');
+console.log('[Init] OPENAI_API_KEY:', OPENAI_API_KEY.slice(0, 10) + '...');
+console.log('[Init] BASE44_WEBHOOK_URL:', BASE44_WEBHOOK_URL);
+console.log('[Init] BASE44_WEBHOOK_SECRET:', 'set');
 
 const buildPrompt = (agentName, listingAddress, contactName) => {
   return `You are an AI calling on behalf of ${agentName || 'a real estate agent'} about ${listingAddress || 'a property'}.
@@ -40,6 +53,8 @@ wss.on('connection', (twilioWs) => {
   const connectToOpenAI = () => {
     aiReady = false;
     console.log('[OpenAI] Connecting...');
+    console.log('[OpenAI] URL: wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01');
+    console.log('[OpenAI] Auth key present:', !!OPENAI_API_KEY);
     
     aiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01', {
       headers: {
@@ -49,7 +64,7 @@ wss.on('connection', (twilioWs) => {
     });
 
     aiWs.on('open', () => {
-      console.log('[OpenAI] Connected, initializing...');
+      console.log('[OpenAI] ✓ Connected, initializing...');
       
       try {
         aiWs.send(JSON.stringify({
