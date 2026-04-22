@@ -34,8 +34,14 @@ Today is ${new Date().toLocaleDateString('en-AU', { weekday: 'long', year: 'nume
 };
 
 const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('OK');
+  if (req.url === '/health' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }));
+    console.log('[Health] Check passed');
+  } else {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not Found');
+  }
 });
 
 const wss = new WebSocket.Server({ server });
