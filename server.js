@@ -11,6 +11,11 @@ if (!OPENAI_API_KEY || !BASE44_WEBHOOK_URL || !BASE44_WEBHOOK_SECRET) {
   process.exit(1);
 }
 
+console.log('[Init] Environment variables loaded');
+console.log('[Init] OPENAI_API_KEY:', OPENAI_API_KEY.slice(0, 10) + '...');
+console.log('[Init] BASE44_WEBHOOK_URL:', BASE44_WEBHOOK_URL);
+console.log('[Init] BASE44_WEBHOOK_SECRET: set');
+
 const buildPrompt = (agentName, listingAddress, contactName) => {
   return `You are an AI calling on behalf of ${agentName || 'a real estate agent'} about ${listingAddress || 'a property'}.
 Speaking with ${contactName || 'a potential buyer'}.
@@ -30,18 +35,31 @@ const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (twilioWs) => {
   console.log('[Bridge] Twilio connected');
-  
+
   let params = {};
   let streamSid = null;
   let bookingDone = false;
   let aiWs = null;
   let aiReady = false;
+  let audioBuffer = []; // FIX: buffer audio while OpenAI connects
 
+  // FIX: helper to safely send audio to Twilio
+  const sendAudioToTwilio = (payload) => {
+    if (twilioWs.readyState === WebSocket.OPEN && streamSid) {
+      twilioWs.send(JSON.stringify({
+        event: 'media',
+        streamSid: streamSid,
+        media: { payload }
+      }));
+    }
+  };
+
+  // FIX: defined here but called AFTER params are set in 'start' event
   const connectToOpenAI = () => {
     aiReady = false;
-    console.log('[OpenAI] Connecting...');
-    
-    aiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01', {
+    console.log('[OpenAI] Connecting for:', params.contact_name, '/', params.agent_name);
+
+    aiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', {
       headers: {
         'Authorization': `Bearer ${OPENAI_API_KEY}`,
         'OpenAI-Beta': 'realtime=v1'
@@ -49,8 +67,8 @@ wss.on('connection', (twilioWs) => {
     });
 
     aiWs.on('open', () => {
-      console.log('[OpenAI] Connected, initializing...');
-      
+      console.log('[OpenAI] Connected, initializing session...');
+
       try {
         aiWs.send(JSON.stringify({
           type: 'session.update',
@@ -75,8 +93,24 @@ wss.on('connection', (twilioWs) => {
         }));
 
         aiWs.send(JSON.stringify({ type: 'response.create' }));
+
         aiReady = true;
         console.log('[OpenAI] Ready for audio');
+
+        // FIX: flush buffered audio now that OpenAI is ready
+        if (audioBuffer.length > 0) {
+          console.log(`[OpenAI] Flushing ${audioBuffer.length} buffered audio chunks`);
+          audioBuffer.forEach(payload => {
+            if (aiWs.readyState === WebSocket.OPEN) {
+              aiWs.send(JSON.stringify({
+                type: 'input_audio_buffer.append',
+                audio: payload
+              }));
+            }
+          });
+          audioBuffer = [];
+        }
+
       } catch (err) {
         console.error('[OpenAI] Init error:', err.message);
       }
@@ -86,26 +120,32 @@ wss.on('connection', (twilioWs) => {
       try {
         const event = JSON.parse(data.toString());
 
+        // Log all event types for debugging
+        console.log('[OpenAI Event]', event.type);
+
+        // Catch and log OpenAI errors
+        if (event.type === 'error') {
+          console.error('[OpenAI ERROR]', JSON.stringify(event));
+        }
+
+        // Send audio back to Twilio
         if (event.type === 'response.audio.delta' && event.delta) {
-          if (twilioWs.readyState === WebSocket.OPEN) {
-            twilioWs.send(JSON.stringify({
-              event: 'media',
-              streamSid: streamSid,
-              media: { payload: event.delta }
-            }));
+          console.log('[Audio] Sending chunk to Twilio, streamSid:', streamSid);
+          sendAudioToTwilio(event.delta);
+        }
+
+        // Log AI transcript and check for booking
+        if (event.type === 'response.audio_transcript.done') {
+          console.log('[AI Said]', event.transcript);
+
+          const transcript = event.transcript || '';
+          if (transcript && /BOOKING_CONFIRMED/i.test(transcript) && !bookingDone) {
+            bookingDone = true;
+            console.log('[Bridge] Booking detected:', transcript);
+            book(transcript, params);
           }
         }
 
-        if (event.type === 'response.audio_transcript.done') {
-          console.log('[AI]', event.transcript);
-        }
-
-        const transcript = event.transcript || event.text || '';
-        if (transcript && /BOOKING_CONFIRMED/i.test(transcript) && !bookingDone) {
-          bookingDone = true;
-          console.log('[Bridge] Booking detected:', transcript);
-          book(transcript, params);
-        }
       } catch (err) {
         console.error('[OpenAI Message] Parse error:', err.message);
       }
@@ -125,8 +165,7 @@ wss.on('connection', (twilioWs) => {
     });
   };
 
-  connectToOpenAI();
-
+  // Handle Twilio messages
   twilioWs.on('message', (data) => {
     try {
       const message = JSON.parse(data.toString());
@@ -134,7 +173,7 @@ wss.on('connection', (twilioWs) => {
       if (message.event === 'start') {
         streamSid = message.start.streamSid;
         const customParams = message.start.customParameters || {};
-        
+
         params = {
           contact_id: customParams.contact_id || '',
           contact_name: customParams.contact_name || '',
@@ -143,16 +182,21 @@ wss.on('connection', (twilioWs) => {
           agent_email: customParams.agent_email || '',
           company_id: customParams.company_id || ''
         };
-        
+
         console.log('[Bridge] Call started:', params.contact_name);
+        console.log('[Bridge] Params:', JSON.stringify(params));
+
+        // FIX: connect to OpenAI AFTER params are populated
+        connectToOpenAI();
       }
 
       if (message.event === 'media') {
         if (!aiReady) {
-          console.warn('[Bridge] OpenAI not ready yet, buffering audio...');
+          // FIX: actually buffer audio instead of dropping it
+          audioBuffer.push(message.media.payload);
           return;
         }
-        
+
         if (aiWs && aiWs.readyState === WebSocket.OPEN) {
           aiWs.send(JSON.stringify({
             type: 'input_audio_buffer.append',
@@ -167,6 +211,7 @@ wss.on('connection', (twilioWs) => {
           aiWs.close();
         }
       }
+
     } catch (err) {
       console.error('[Twilio Message] Parse error:', err.message);
     }
@@ -240,18 +285,30 @@ async function book(text, p) {
     });
 
     if (!webhookRes.ok) throw new Error(`Webhook error: ${webhookRes.status}`);
-    console.log('[Book] Sent to Base44 -', type, booking.iso_date);
+    console.log('[Book] ✓ Sent to Base44 -', type, booking.iso_date);
   } catch (err) {
     console.error('[Book] Error:', err.message);
   }
 }
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Bridge] Running on 0.0.0.0:${PORT}`);
+  console.log(`[Bridge] ✓ Running on 0.0.0.0:${PORT}`);
+  console.log('[Bridge] Ready to accept connections');
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception:', err.message);
+  console.error(err.stack);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] Unhandled rejection:', reason);
+  process.exit(1);
 });
 
 process.on('SIGTERM', () => {
-  console.log('[Bridge] SIGTERM received, closing');
+  console.log('[Bridge] SIGTERM received, closing gracefully');
   server.close();
   process.exit(0);
 });
