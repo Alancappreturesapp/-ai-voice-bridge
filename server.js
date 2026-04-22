@@ -135,3 +135,7 @@ function book(text, p) {
   })
   .catch(err => console.error('[Book] ' + err.message));
 }
+
+server.listen(PORT, '0.0.0.0', () => console.log('[Bridge] Running on 0.0.0.0:' + PORT));
+Replace and push.
+}
