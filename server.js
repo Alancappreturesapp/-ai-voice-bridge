@@ -20,6 +20,7 @@ const server = http.createServer((req, res) => { res.writeHead(200); res.end('OK
 const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (twilioWs, req) => {
+  console.log('[Bridge] New WebSocket connection:', req.url);
   const p = url.parse(req.url, true).query;
   let streamSid = null, bookingDone = false;
 
@@ -27,7 +28,11 @@ wss.on('connection', (twilioWs, req) => {
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'OpenAI-Beta': 'realtime=v1' }
   });
 
+  aiWs.on('error', (err) => console.error('[Bridge] OpenAI WS error:', err.message));
+  twilioWs.on('error', (err) => console.error('[Bridge] Twilio WS error:', err.message));
+
   aiWs.on('open', () => {
+    console.log('[Bridge] Connected to OpenAI Realtime API');
     aiWs.send(JSON.stringify({ type: 'session.update', session: {
       turn_detection: { type: 'server_vad' },
       input_audio_format: 'g711_ulaw', output_audio_format: 'g711_ulaw',
