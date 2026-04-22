@@ -1,4 +1,7 @@
-const WebSocket = require('ws');
+import { Button } from "@/components/ui/button";
+import { Download } from "lucide-react";
+
+const SERVER_JS = `const WebSocket = require('ws');
 const http = require('http');
 
 const PORT = process.env.PORT || 8080;
@@ -6,90 +9,52 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const BASE44_WEBHOOK_URL = process.env.BASE44_WEBHOOK_URL;
 const BASE44_WEBHOOK_SECRET = process.env.BASE44_WEBHOOK_SECRET;
 
-if (!OPENAI_API_KEY) {
-  console.error('[ERROR] Missing OPENAI_API_KEY');
+if (!OPENAI_API_KEY || !BASE44_WEBHOOK_URL || !BASE44_WEBHOOK_SECRET) {
+  console.error('[ERROR] Missing required env vars');
   process.exit(1);
 }
-if (!BASE44_WEBHOOK_URL) {
-  console.error('[ERROR] Missing BASE44_WEBHOOK_URL');
-  process.exit(1);
-}
-if (!BASE44_WEBHOOK_SECRET) {
-  console.error('[ERROR] Missing BASE44_WEBHOOK_SECRET');
-  process.exit(1);
-}
-
-console.log('[Init] Environment variables loaded');
-console.log('[Init] OPENAI_API_KEY:', OPENAI_API_KEY.slice(0, 10) + '...');
-console.log('[Init] BASE44_WEBHOOK_URL:', BASE44_WEBHOOK_URL);
-console.log('[Init] BASE44_WEBHOOK_SECRET:', 'set');
 
 const buildPrompt = (agentName, listingAddress, contactName) => {
-  return `You are an AI calling on behalf of ${agentName || 'a real estate agent'} about ${listingAddress || 'a property'}.
-Speaking with ${contactName || 'a potential buyer'}.
+  return \`You are an AI calling on behalf of \${agentName || 'a real estate agent'} about \${listingAddress || 'a property'}.
+Speaking with \${contactName || 'a potential buyer'}.
 Goal: Book them for a phone call or inspection.
 Ask what date and time works, confirm it, then say: BOOKING_CONFIRMED: [call or meeting] on [date] at [time]
 Be warm and brief.
-Today is ${new Date().toLocaleDateString('en-AU', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.`;
+Today is \${new Date().toLocaleDateString('en-AU', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.
+\`;
 };
 
 const server = http.createServer((req, res) => {
-  try {
-    if (req.url === '/health' || req.url === '/') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }));
-    } else {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('Not Found');
-    }
-  } catch (err) {
-    console.error('[Server] Error handling request:', err.message);
-    res.writeHead(500, { 'Content-Type': 'text/plain' });
-    res.end('Internal Server Error');
-  }
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('OK');
 });
 
 const wss = new WebSocket.Server({ server });
 
 wss.on('connection', (twilioWs) => {
   console.log('[Bridge] Twilio connected');
-
+  
   let params = {};
   let streamSid = null;
   let bookingDone = false;
   let aiWs = null;
   let aiReady = false;
-  let audioBuffer = []; // FIX: actually buffer audio until OpenAI is ready
 
-  // FIX: helper to send audio to Twilio safely
-  const sendAudioToTwilio = (payload) => {
-    if (twilioWs.readyState === WebSocket.OPEN && streamSid) {
-      twilioWs.send(JSON.stringify({
-        event: 'media',
-        streamSid: streamSid,
-        media: { payload }
-      }));
-    }
-  };
-
-  // FIX: connectToOpenAI is now called AFTER params are set in the 'start' event
   const connectToOpenAI = () => {
     aiReady = false;
     console.log('[OpenAI] Connecting...');
-    console.log('[OpenAI] Auth key present:', !!OPENAI_API_KEY);
-
-    aiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', {
+    
+    aiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01', {
       headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Authorization': \`Bearer \${OPENAI_API_KEY}\`,
         'OpenAI-Beta': 'realtime=v1'
       }
     });
 
     aiWs.on('open', () => {
-      console.log('[OpenAI] ✓ Connected, initializing...');
-
+      console.log('[OpenAI] Connected, initializing...');
+      
       try {
-        // FIX: params are now populated before this runs
         aiWs.send(JSON.stringify({
           type: 'session.update',
           session: {
@@ -113,24 +78,8 @@ wss.on('connection', (twilioWs) => {
         }));
 
         aiWs.send(JSON.stringify({ type: 'response.create' }));
-
         aiReady = true;
         console.log('[OpenAI] Ready for audio');
-
-        // FIX: flush any buffered audio now that OpenAI is ready
-        if (audioBuffer.length > 0) {
-          console.log(`[OpenAI] Flushing ${audioBuffer.length} buffered audio chunks`);
-          audioBuffer.forEach(payload => {
-            if (aiWs.readyState === WebSocket.OPEN) {
-              aiWs.send(JSON.stringify({
-                type: 'input_audio_buffer.append',
-                audio: payload
-              }));
-            }
-          });
-          audioBuffer = [];
-        }
-
       } catch (err) {
         console.error('[OpenAI] Init error:', err.message);
       }
@@ -140,33 +89,26 @@ wss.on('connection', (twilioWs) => {
       try {
         const event = JSON.parse(data.toString());
 
-        // Log all event types for debugging
-        console.log('[OpenAI Event]', event.type);
-
-        // Catch OpenAI errors
-        if (event.type === 'error') {
-          console.error('[OpenAI ERROR]', JSON.stringify(event));
-        }
-
-        // Send audio back to Twilio
         if (event.type === 'response.audio.delta' && event.delta) {
-          console.log('[Audio] Sending to Twilio, streamSid:', streamSid);
-          sendAudioToTwilio(event.delta);
-        }
-
-        // Log transcripts
-        if (event.type === 'response.audio_transcript.done') {
-          console.log('[AI]', event.transcript);
-
-          // Check for booking confirmation
-          const transcript = event.transcript || '';
-          if (transcript && /BOOKING_CONFIRMED/i.test(transcript) && !bookingDone) {
-            bookingDone = true;
-            console.log('[Bridge] Booking detected:', transcript);
-            book(transcript, params);
+          if (twilioWs.readyState === WebSocket.OPEN) {
+            twilioWs.send(JSON.stringify({
+              event: 'media',
+              streamSid: streamSid,
+              media: { payload: event.delta }
+            }));
           }
         }
 
+        if (event.type === 'response.audio_transcript.done') {
+          console.log('[AI]', event.transcript);
+        }
+
+        const transcript = event.transcript || event.text || '';
+        if (transcript && /BOOKING_CONFIRMED/i.test(transcript) && !bookingDone) {
+          bookingDone = true;
+          console.log('[Bridge] Booking detected:', transcript);
+          book(transcript, params);
+        }
       } catch (err) {
         console.error('[OpenAI Message] Parse error:', err.message);
       }
@@ -186,7 +128,8 @@ wss.on('connection', (twilioWs) => {
     });
   };
 
-  // Handle Twilio messages
+  connectToOpenAI();
+
   twilioWs.on('message', (data) => {
     try {
       const message = JSON.parse(data.toString());
@@ -194,7 +137,7 @@ wss.on('connection', (twilioWs) => {
       if (message.event === 'start') {
         streamSid = message.start.streamSid;
         const customParams = message.start.customParameters || {};
-
+        
         params = {
           contact_id: customParams.contact_id || '',
           contact_name: customParams.contact_name || '',
@@ -203,21 +146,16 @@ wss.on('connection', (twilioWs) => {
           agent_email: customParams.agent_email || '',
           company_id: customParams.company_id || ''
         };
-
+        
         console.log('[Bridge] Call started:', params.contact_name);
-        console.log('[Bridge] Params:', JSON.stringify(params));
-
-        // FIX: connect to OpenAI AFTER params are populated
-        connectToOpenAI();
       }
 
       if (message.event === 'media') {
         if (!aiReady) {
-          // FIX: actually buffer the audio instead of dropping it
-          audioBuffer.push(message.media.payload);
+          console.warn('[Bridge] OpenAI not ready yet, buffering audio...');
           return;
         }
-
+        
         if (aiWs && aiWs.readyState === WebSocket.OPEN) {
           aiWs.send(JSON.stringify({
             type: 'input_audio_buffer.append',
@@ -232,7 +170,6 @@ wss.on('connection', (twilioWs) => {
           aiWs.close();
         }
       }
-
     } catch (err) {
       console.error('[Twilio Message] Parse error:', err.message);
     }
@@ -260,20 +197,26 @@ async function book(text, p) {
     const gptRes = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Authorization': \`Bearer \${OPENAI_API_KEY}\`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
         model: 'gpt-4o-mini',
         response_format: { type: 'json_object' },
-        messages: [{
-          role: 'user',
-          content: `Extract appointment date/time. Today: ${new Date().toISOString()}. Return {iso_date: "ISO8601 in Australia/Melbourne"}. Text: "${text}"`
-        }]
+        messages: [
+          {
+            role: 'system',
+            content: 'Extract the appointment date and time from the text. Return a JSON object with iso_date field in ISO8601 format (Australia/Melbourne timezone).'
+          },
+          {
+            role: 'user',
+            content: \`Today is \${new Date().toISOString()}. Extract appointment date/time. Text: "\${text}". Return JSON: {iso_date: "ISO8601"}\`
+          }
+        ]
       })
     });
 
-    if (!gptRes.ok) throw new Error(`GPT error: ${gptRes.status}`);
+    if (!gptRes.ok) throw new Error(\`GPT error: \${gptRes.status}\`);
     const gptData = await gptRes.json();
     const booking = JSON.parse(gptData.choices[0].message.content);
 
@@ -296,7 +239,7 @@ async function book(text, p) {
       })
     });
 
-    if (!webhookRes.ok) throw new Error(`Webhook error: ${webhookRes.status}`);
+    if (!webhookRes.ok) throw new Error(\`Webhook error: \${webhookRes.status}\`);
     console.log('[Book] ✓ Sent to Base44 -', type, booking.iso_date);
   } catch (err) {
     console.error('[Book] Error:', err.message);
@@ -304,23 +247,79 @@ async function book(text, p) {
 }
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Bridge] ✓ Server listening on 0.0.0.0:${PORT}`);
-  console.log('[Bridge] Ready to accept connections');
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('[FATAL] Uncaught exception:', err.message);
-  console.error(err.stack);
-  process.exit(1);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('[FATAL] Unhandled rejection:', reason);
-  process.exit(1);
+  console.log(\`[Bridge] Running on 0.0.0.0:\${PORT}\`);
 });
 
 process.on('SIGTERM', () => {
-  console.log('[Bridge] SIGTERM received, closing gracefully');
+  console.log('[Bridge] SIGTERM received, closing');
   server.close();
   process.exit(0);
 });
+`;
+
+const PACKAGE_JSON = `{
+  "name": "ai-voice-bridge",
+  "version": "1.0.0",
+  "description": "AI Voice Bridge for Twilio and OpenAI",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "8.16.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+`;
+
+function downloadFile(filename, content) {
+  const blob = new Blob([content], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+export default function DownloadBridge() {
+  return (
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-8">
+      <div className="bg-white rounded-2xl shadow-lg p-10 max-w-lg w-full text-center space-y-6">
+        <h1 className="text-2xl font-bold text-slate-800">AI Voice Bridge — Download Files</h1>
+        <p className="text-slate-500 text-sm">
+          Download these 2 files, put them in a folder, push to GitHub, and deploy to Railway.
+        </p>
+
+        <div className="space-y-3">
+          <Button className="w-full gap-2" onClick={() => downloadFile('server.js', SERVER_JS)}>
+            <Download className="w-4 h-4" /> Download server.js
+          </Button>
+          <Button variant="outline" className="w-full gap-2" onClick={() => downloadFile('package.json', PACKAGE_JSON)}>
+            <Download className="w-4 h-4" /> Download package.json
+          </Button>
+        </div>
+
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-left text-sm text-amber-800 space-y-1">
+          <p className="font-semibold">⚠️ Railway Environment Variables Required:</p>
+          <ul className="list-disc list-inside space-y-0.5 text-amber-700">
+            <li><code className="bg-amber-100 px-1 rounded">OPENAI_API_KEY</code></li>
+            <li><code className="bg-amber-100 px-1 rounded">BASE44_WEBHOOK_URL</code></li>
+            <li><code className="bg-amber-100 px-1 rounded">BASE44_WEBHOOK_SECRET</code></li>
+          </ul>
+        </div>
+
+        <div className="bg-slate-50 rounded-xl p-4 text-left text-sm text-slate-600 space-y-2">
+          <p className="font-semibold text-slate-700">Deployment steps:</p>
+          <ol className="list-decimal list-inside space-y-1">
+            <li>Put both files in a new folder and push to GitHub</li>
+            <li>Go to <strong>railway.app</strong> → New Project → Deploy from GitHub</li>
+            <li>Add the 3 environment variables above in Railway Settings</li>
+            <li>Copy the Railway URL → paste as <code className="bg-slate-100 px-1 rounded">RAILWAY_BRIDGE_URL</code> in Base44 secrets</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+  );
+}
