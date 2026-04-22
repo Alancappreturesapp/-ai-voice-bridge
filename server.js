@@ -107,7 +107,7 @@ wss.on('connection', (twilioWs) => {
     if (aiWs.readyState === WebSocket.OPEN) aiWs.close();
   });
 
-  twilioWs.on('error', (err) => console.error('[Twilio]', err.message);
+  twilioWs.on('error', (err) => console.error('[Twilio]', err.message));
 });
 
 async function book(text, p) {
