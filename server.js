@@ -261,6 +261,17 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[Bridge] Running on 0.0.0.0:${PORT}`);
 });
 
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception:', err.message);
+  console.error(err.stack);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[FATAL] Unhandled rejection:', reason);
+  process.exit(1);
+});
+
 process.on('SIGTERM', () => {
   console.log('[Bridge] SIGTERM received, closing');
   server.close();
