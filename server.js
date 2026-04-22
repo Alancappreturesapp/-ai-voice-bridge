@@ -22,15 +22,40 @@ if (!BASE44_WEBHOOK_SECRET) {
 console.log('[Init] Environment variables loaded');
 console.log('[Init] OPENAI_API_KEY:', OPENAI_API_KEY.slice(0, 10) + '...');
 console.log('[Init] BASE44_WEBHOOK_URL:', BASE44_WEBHOOK_URL);
-console.log('[Init] BASE44_WEBHOOK_SECRET:', 'set');
+console.log('[Init] BASE44_WEBHOOK_SECRET: set');
 
+// FIX: Stronger prompt - AI must ask questions, not answer them
 const buildPrompt = (agentName, listingAddress, contactName) => {
-  return `You are an AI calling on behalf of ${agentName || 'a real estate agent'} about ${listingAddress || 'a property'}.
-Speaking with ${contactName || 'a potential buyer'}.
-Goal: Book them for a phone call or inspection.
-Ask what date and time works, confirm it, then say: BOOKING_CONFIRMED: [call or meeting] on [date] at [time]
-Be warm and brief.
-Today is ${new Date().toLocaleDateString('en-AU', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}.`;
+  const today = new Date().toLocaleDateString('en-AU', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    timeZone: 'Australia/Melbourne'
+  });
+
+  return `You are an AI assistant making an outbound call on behalf of ${agentName || 'a real estate agent'}.
+You are calling ${contactName || 'a potential buyer'} about the property at ${listingAddress || 'a property listing'}.
+
+Today is ${today} (Melbourne, Australia time).
+
+YOUR GOAL: Book the contact for either a phone call or an in-person inspection.
+
+HOW TO RUN THE CALL:
+1. Introduce yourself briefly: "Hi, I'm calling on behalf of ${agentName || 'the agent'} about ${listingAddress || 'the property'}."
+2. Ask if they are still interested in the property.
+3. Ask: "What date and time works best for you for a quick call or inspection?"
+4. LISTEN to their answer. Do NOT suggest dates yourself unless they ask.
+5. Once they give a date and time, confirm it back to them clearly.
+6. End with: BOOKING_CONFIRMED: [call or inspection] on [day date month year] at [time]
+
+IMPORTANT RULES:
+- You are CALLING them — they did not call you. Be warm but get to the point.
+- Do NOT answer questions about the property in detail — say "the agent will cover that on the call."
+- Do NOT suggest times — always ask them first what works.
+- Keep responses SHORT. One or two sentences at a time.
+- Always speak in Australian English.
+- If they are not interested, politely end the call. Do not push.`;
 };
 
 const server = http.createServer((req, res) => {
@@ -59,9 +84,8 @@ wss.on('connection', (twilioWs) => {
   let bookingDone = false;
   let aiWs = null;
   let aiReady = false;
-  let audioBuffer = []; // FIX: actually buffer audio until OpenAI is ready
+  let audioBuffer = [];
 
-  // FIX: helper to send audio to Twilio safely
   const sendAudioToTwilio = (payload) => {
     if (twilioWs.readyState === WebSocket.OPEN && streamSid) {
       twilioWs.send(JSON.stringify({
@@ -72,11 +96,9 @@ wss.on('connection', (twilioWs) => {
     }
   };
 
-  // FIX: connectToOpenAI is now called AFTER params are set in the 'start' event
   const connectToOpenAI = () => {
     aiReady = false;
-    console.log('[OpenAI] Connecting...');
-    console.log('[OpenAI] Auth key present:', !!OPENAI_API_KEY);
+    console.log('[OpenAI] Connecting for:', params.contact_name, '/', params.agent_name);
 
     aiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', {
       headers: {
@@ -86,10 +108,9 @@ wss.on('connection', (twilioWs) => {
     });
 
     aiWs.on('open', () => {
-      console.log('[OpenAI] ✓ Connected, initializing...');
+      console.log('[OpenAI] Connected, initializing session...');
 
       try {
-        // FIX: params are now populated before this runs
         aiWs.send(JSON.stringify({
           type: 'session.update',
           session: {
@@ -103,12 +124,16 @@ wss.on('connection', (twilioWs) => {
           }
         }));
 
+        // FIX: Tell AI to START the conversation, not wait for a question
         aiWs.send(JSON.stringify({
           type: 'conversation.item.create',
           item: {
             type: 'message',
             role: 'user',
-            content: [{ type: 'input_text', text: 'Begin the call now.' }]
+            content: [{
+              type: 'input_text',
+              text: 'The call has just connected. Start the conversation now by introducing yourself and asking if they are still interested in the property.'
+            }]
           }
         }));
 
@@ -117,7 +142,7 @@ wss.on('connection', (twilioWs) => {
         aiReady = true;
         console.log('[OpenAI] Ready for audio');
 
-        // FIX: flush any buffered audio now that OpenAI is ready
+        // Flush buffered audio
         if (audioBuffer.length > 0) {
           console.log(`[OpenAI] Flushing ${audioBuffer.length} buffered audio chunks`);
           audioBuffer.forEach(payload => {
@@ -140,25 +165,19 @@ wss.on('connection', (twilioWs) => {
       try {
         const event = JSON.parse(data.toString());
 
-        // Log all event types for debugging
         console.log('[OpenAI Event]', event.type);
 
-        // Catch OpenAI errors
         if (event.type === 'error') {
           console.error('[OpenAI ERROR]', JSON.stringify(event));
         }
 
-        // Send audio back to Twilio
         if (event.type === 'response.audio.delta' && event.delta) {
-          console.log('[Audio] Sending to Twilio, streamSid:', streamSid);
           sendAudioToTwilio(event.delta);
         }
 
-        // Log transcripts
         if (event.type === 'response.audio_transcript.done') {
-          console.log('[AI]', event.transcript);
+          console.log('[AI Said]', event.transcript);
 
-          // Check for booking confirmation
           const transcript = event.transcript || '';
           if (transcript && /BOOKING_CONFIRMED/i.test(transcript) && !bookingDone) {
             bookingDone = true;
@@ -186,7 +205,6 @@ wss.on('connection', (twilioWs) => {
     });
   };
 
-  // Handle Twilio messages
   twilioWs.on('message', (data) => {
     try {
       const message = JSON.parse(data.toString());
@@ -207,13 +225,11 @@ wss.on('connection', (twilioWs) => {
         console.log('[Bridge] Call started:', params.contact_name);
         console.log('[Bridge] Params:', JSON.stringify(params));
 
-        // FIX: connect to OpenAI AFTER params are populated
         connectToOpenAI();
       }
 
       if (message.event === 'media') {
         if (!aiReady) {
-          // FIX: actually buffer the audio instead of dropping it
           audioBuffer.push(message.media.payload);
           return;
         }
@@ -257,6 +273,7 @@ async function book(text, p) {
   try {
     const type = /meeting|inspection/i.test(text) ? 'meeting' : 'call';
 
+    // FIX: Explicitly request Melbourne timezone ISO date
     const gptRes = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -269,19 +286,24 @@ async function book(text, p) {
         messages: [
           {
             role: 'system',
-            content: 'Extract the appointment date and time from the text. Return a JSON object with iso_date field in ISO8601 format (Australia/Melbourne timezone).'
+            content: `You extract appointment dates from text. Always return ISO8601 format in Australia/Melbourne timezone (AEST = UTC+10, AEDT = UTC+11). Return ONLY: {"iso_date": "YYYY-MM-DDTHH:mm:ss+10:00"}`
           },
           {
             role: 'user',
-            content: `Today is ${new Date().toISOString()}. Extract appointment date/time. Text: "${text}". Return JSON: {iso_date: "ISO8601"}`
+            content: `Today is ${new Date().toLocaleString('en-AU', { timeZone: 'Australia/Melbourne', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} in Melbourne Australia. Extract the appointment date and time from this text: "${text}". Return JSON with iso_date in Australia/Melbourne timezone.`
           }
         ]
       })
     });
 
-    if (!gptRes.ok) throw new Error(`GPT error: ${gptRes.status}`);
+    if (!gptRes.ok) {
+      const errText = await gptRes.text();
+      throw new Error(`GPT error: ${gptRes.status} - ${errText}`);
+    }
+
     const gptData = await gptRes.json();
     const booking = JSON.parse(gptData.choices[0].message.content);
+    console.log('[Book] Extracted date:', booking.iso_date);
 
     const webhookRes = await fetch(BASE44_WEBHOOK_URL, {
       method: 'POST',
@@ -302,7 +324,10 @@ async function book(text, p) {
       })
     });
 
-    if (!webhookRes.ok) throw new Error(`Webhook error: ${webhookRes.status}`);
+    if (!webhookRes.ok) {
+      const errText = await webhookRes.text();
+      throw new Error(`Webhook error: ${webhookRes.status} - ${errText}`);
+    }
     console.log('[Book] ✓ Sent to Base44 -', type, booking.iso_date);
   } catch (err) {
     console.error('[Book] Error:', err.message);
@@ -320,7 +345,7 @@ process.on('uncaughtException', (err) => {
   process.exit(1);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason) => {
   console.error('[FATAL] Unhandled rejection:', reason);
   process.exit(1);
 });
