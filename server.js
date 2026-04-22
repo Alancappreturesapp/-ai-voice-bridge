@@ -1,3 +1,7 @@
+process.on('uncaughtException', (err) => {
+  console.error('[Bridge] FATAL:', err.message, err.stack);
+  process.exit(1);
+});
 const WebSocket = require('ws');
 const http = require('http');
 const url = require('url');
