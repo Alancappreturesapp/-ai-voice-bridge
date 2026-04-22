@@ -87,7 +87,7 @@ wss.on('connection', (twilioWs, req) => {
       !bookingDone
     ) {
       bookingDone = true;
-      book(text, p);
+      book(text, p).catch(err => console.error('[Bridge] Booking error:', err.message));
     }
   });
 
@@ -128,46 +128,51 @@ wss.on('connection', (twilioWs, req) => {
 });
 
 async function book(text, p) {
-  const type = /meeting|inspection/i.test(text) ? 'meeting' : 'call';
+  try {
+    const type = /meeting|inspection/i.test(text) ? 'meeting' : 'call';
 
-  const r = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      response_format: { type: 'json_object' },
-      messages: [{
-        role: 'user',
-        content: `Return JSON with iso_date (ISO8601 Australia/Melbourne) from: "${text}". Today: ${new Date().toISOString()}`
-      }]
-    })
-  });
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        response_format: { type: 'json_object' },
+        messages: [{
+          role: 'user',
+          content: `Return JSON with iso_date (ISO8601 Australia/Melbourne) from: "${text}". Today: ${new Date().toISOString()}`
+        }]
+      })
+    });
 
-  const d = JSON.parse((await r.json()).choices[0].message.content);
+    const j = await r.json();
+    const d = JSON.parse(j.choices[0].message.content);
 
-  await fetch(BASE44_WEBHOOK_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-webhook-secret': BASE44_WEBHOOK_SECRET
-    },
-    body: JSON.stringify({
-      contact_id: p.contact_id,
-      contact_name: p.contact_name,
-      agent_name: p.agent_name,
-      agent_email: p.agent_email,
-      listing_address: p.listing_address,
-      appointment_type: type,
-      appointment_date: d.iso_date,
-      notes: text,
-      company_id: p.company_id
-    })
-  });
+    await fetch(BASE44_WEBHOOK_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-webhook-secret': BASE44_WEBHOOK_SECRET
+      },
+      body: JSON.stringify({
+        contact_id: p.contact_id,
+        contact_name: p.contact_name,
+        agent_name: p.agent_name,
+        agent_email: p.agent_email,
+        listing_address: p.listing_address,
+        appointment_type: type,
+        appointment_date: d.iso_date,
+        notes: text,
+        company_id: p.company_id
+      })
+    });
 
-  console.log('[Bridge] Booking created:', type, d.iso_date);
+    console.log('[Bridge] Booking created:', type, d.iso_date);
+  } catch (err) {
+    console.error('[Bridge] Book function error:', err.message);
+  }
 }
 
 server.listen(PORT, '0.0.0.0', () => {
