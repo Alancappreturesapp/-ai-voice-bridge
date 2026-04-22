@@ -47,6 +47,16 @@ wss.on('connection', (twilioWs) => {
         instructions: buildPrompt(p.agent_name, p.listing_address, p.contact_name)
       }
     }));
+
+    aiWs.send(JSON.stringify({
+      type: 'conversation.item.create',
+      item: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Start the call greeting.' }]
+      }
+    }));
+
     aiWs.send(JSON.stringify({ type: 'response.create' }));
   });
 
@@ -121,8 +131,3 @@ function book(text, p) {
       headers: { 'Content-Type': 'application/json', 'x-webhook-secret': BASE44_WEBHOOK_SECRET },
       body: JSON.stringify({ contact_id: p.contact_id, contact_name: p.contact_name, agent_name: p.agent_name, agent_email: p.agent_email, listing_address: p.listing_address, appointment_type: /meeting/i.test(text) ? 'meeting' : 'call', appointment_date: d.iso_date, notes: text, company_id: p.company_id })
     });
-  })
-  .catch(err => console.error('[Book] ' + err.message));
-}
-
-server.listen(PORT, '0.0.0.0', () => console.log('[Bridge] Running on 0.0.0.0:' + PORT));
